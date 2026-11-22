@@ -15,7 +15,7 @@ url="https://postmarketos.org"
 license="MIT"
 arch="aarch64"
 options="!check !archcheck"
-depends="postmarketos-base firmware-samsung-j4primelte linux-lts mkbootimg mesa-dri-swrast"
+depends="postmarketos-base firmware-samsung-j4primelte linux-lts mkbootimg"
 makedepends="devicepkg-dev"
 source="deviceinfo initfs-hook.sh"
 
