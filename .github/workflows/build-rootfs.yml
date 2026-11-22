@@ -160,14 +160,12 @@ jobs:
         if: failure()
         run: |
           LOGFILE="$HOME/.local/var/pmbootstrap/log.txt"
-          if [ ! -f "$LOGFILE" ]; then
-            echo "::error::pmbootstrap log.txt not found"
-            exit 0
-          fi
-          echo "::warning::===== last 70 lines of pmbootstrap log.txt ====="
-          tail -70 "$LOGFILE" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+          SRC="build.log"
+          [ -f "$SRC" ] || SRC="$LOGFILE"
+          echo "::warning::===== tail of $SRC ====="
+          tail -c 60000 "$SRC" | tail -110 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
             | while IFS= read -r line; do
-                line="$(printf '%.2000s' "$line")"
+                line="$(printf '%.1800s' "$line")"
                 echo "::error::${line}"
               done
 
