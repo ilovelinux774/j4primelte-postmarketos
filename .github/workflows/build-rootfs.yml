@@ -19,6 +19,10 @@ concurrency:
   group: build-rootfs-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  issues: write
+
 on:
   # pull_request lets the workflow run for the PR that introduces it
   # (GitHub only discovers workflow_dispatch from the default branch).
@@ -124,6 +128,7 @@ jobs:
       - name: Build the rootfs image (single partition, raw ext4)
         run: |
           set -o pipefail
+          mkdir -p build-artifacts
           if ! python3 ~/pmbootstrap/pmbootstrap.py install \
                --single-partition --no-sparse \
                --password "$ROOTFS_PASSWORD" 2>&1 | tee build.log; then
@@ -133,10 +138,60 @@ jobs:
               echo "=== raw pmbootstrap log file (last 300 lines) ==="
               tail -300 "$LOGFILE"
             fi
+            cp build.log build-artifacts/ 2>/dev/null || true
+            cp "$LOGFILE" build-artifacts/pmbootstrap-log.txt 2>/dev/null || true
             python3 ~/pmbootstrap/pmbootstrap.py zap 2>&1 | tail -5 || true
             exit 1
           fi
           df -h
+
+      - name: Upload pmbootstrap logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-build-logs-${{ github.run_number }}
+          path: |
+            build-artifacts/
+            build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Comment the log tail on the PR (on failure)
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, urllib.request
+          path = os.path.expanduser("~/.local/var/pmbootstrap/log.txt")
+          if os.path.exists(path):
+              with open(path, errors="replace") as fh:
+                  lines = fh.readlines()
+              tail = "".join(lines[-150:])
+          else:
+              tail = "(no pmbootstrap log.txt found)"
+          body = (
+              "pmbootstrap install failed. Last 150 lines of `~/.local/var/pmbootstrap/log.txt`:\n\n"
+              "```\n" + tail + "\n```\n"
+          )
+          url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{os.environ['PR_NUMBER']}/comments"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps({"body": body}).encode(),
+              headers={
+                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "j4primelte-ci",
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  print("comment posted, status", resp.status)
+          except Exception as exc:
+              print("failed to post comment:", exc)
+          PYEOF
 
       - name: Export and stamp the rootfs image
         run: |
