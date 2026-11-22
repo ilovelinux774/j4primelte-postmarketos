@@ -1,0 +1,30 @@
+# Contributor: Ataberk Özen <ataberkozen123@gmail.com>
+# Maintainer: Camden B <camden.o.b@gmail.com>
+# Reference: <https://postmarketos.org/devicepkg>
+#
+# Samsung Galaxy J4+ (j4primelte), downstream medusa64 kernel (aarch64).
+# The actual kernel/boot image is built separately (see artifacts/ and the
+# Gt-s7580-pmos repository); this package intentionally depends on Alpine's
+# binary linux-lts only so that mkinitfs succeeds inside the install chroot.
+# Do NOT flash the boot artifacts produced by this package's build.
+pkgname="device-samsung-j4primelte"
+pkgdesc="Samsung Galaxy J4+"
+pkgver=0.1
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="aarch64"
+options="!check !archcheck"
+depends="postmarketos-base firmware-samsung-j4primelte linux-lts mkbootimg mesa-dri-swrast"
+makedepends="devicepkg-dev"
+source="deviceinfo initfs-hook.sh"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+}
+
+sha512sums=""
