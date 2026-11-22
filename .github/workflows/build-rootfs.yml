@@ -156,46 +156,33 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Comment the log tail on the PR (on failure)
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+      - name: Log tail as annotations (on failure)
+        if: failure()
         run: |
-          python3 - <<'PYEOF' > /tmp/logtail.md
-          import os
-          path = os.path.expanduser("~/.local/var/pmbootstrap/log.txt")
-          if os.path.exists(path):
-              with open(path, errors="replace") as fh:
-                  lines = fh.readlines()
-              tail = "".join(lines[-180:])
-          else:
-              tail = "(no pmbootstrap log.txt found)"
-          print("pmbootstrap install failed. Last 180 lines of `~/.local/var/pmbootstrap/log.txt`:\n\n```\n" + tail + "\n```")
-          PYEOF
-          wc -c /tmp/logtail.md
-          if command -v gh >/dev/null 2>&1; then
-            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/logtail.md
-          else
-            python3 - <<'PYEOF'
-          import json, os, urllib.request
-          with open("/tmp/logtail.md") as fh:
-              body = fh.read()
-          url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{os.environ['PR_NUMBER']}/comments"
-          req = urllib.request.Request(
-              url,
-              data=json.dumps({"body": body}).encode(),
-              headers={
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                  "Accept": "application/vnd.github+json",
-                  "User-Agent": "j4primelte-ci",
-              },
-              method="POST",
-          )
-          with urllib.request.urlopen(req, timeout=30) as resp:
-              print("comment posted, status", resp.status)
-          PYEOF
+          LOGFILE="$HOME/.local/var/pmbootstrap/log.txt"
+          if [ ! -f "$LOGFILE" ]; then
+            echo "::error::pmbootstrap log.txt not found"
+            exit 0
           fi
+          echo "::warning::===== last 70 lines of pmbootstrap log.txt ====="
+          tail -70 "$LOGFILE" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+            | while IFS= read -r line; do
+                line="$(printf '%.2000s' "$line")"
+                echo "::error::${line}"
+              done
+
+      - name: Mirror reachability preflight (always, as annotations)
+        if: always()
+        run: |
+          for url in \
+            https://gitlab.postmarketos.org/ \
+            https://mirror.postmarketos.org/ \
+            https://dl-cdn.alpinelinux.org/alpine/ \
+            https://github.com/ \
+          ; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 "$url" || echo curl-failed)"
+            echo "::warning::reachability $url -> $code"
+          done
 
       - name: Export and stamp the rootfs image
         run: |
