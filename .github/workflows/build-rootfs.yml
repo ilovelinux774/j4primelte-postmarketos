@@ -162,19 +162,25 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          python3 - <<'PYEOF'
-          import json, os, urllib.request
+          python3 - <<'PYEOF' > /tmp/logtail.md
+          import os
           path = os.path.expanduser("~/.local/var/pmbootstrap/log.txt")
           if os.path.exists(path):
               with open(path, errors="replace") as fh:
                   lines = fh.readlines()
-              tail = "".join(lines[-150:])
+              tail = "".join(lines[-180:])
           else:
               tail = "(no pmbootstrap log.txt found)"
-          body = (
-              "pmbootstrap install failed. Last 150 lines of `~/.local/var/pmbootstrap/log.txt`:\n\n"
-              "```\n" + tail + "\n```\n"
-          )
+          print("pmbootstrap install failed. Last 180 lines of `~/.local/var/pmbootstrap/log.txt`:\n\n```\n" + tail + "\n```")
+          PYEOF
+          wc -c /tmp/logtail.md
+          if command -v gh >/dev/null 2>&1; then
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file /tmp/logtail.md
+          else
+            python3 - <<'PYEOF'
+          import json, os, urllib.request
+          with open("/tmp/logtail.md") as fh:
+              body = fh.read()
           url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/issues/{os.environ['PR_NUMBER']}/comments"
           req = urllib.request.Request(
               url,
@@ -186,12 +192,10 @@ jobs:
               },
               method="POST",
           )
-          try:
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  print("comment posted, status", resp.status)
-          except Exception as exc:
-              print("failed to post comment:", exc)
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              print("comment posted, status", resp.status)
           PYEOF
+          fi
 
       - name: Export and stamp the rootfs image
         run: |
