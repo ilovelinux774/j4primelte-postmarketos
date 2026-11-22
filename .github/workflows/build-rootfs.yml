@@ -15,7 +15,16 @@
 
 name: Build j4primelte rootfs (pmbootstrap)
 
+concurrency:
+  group: build-rootfs-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
+  # pull_request lets the workflow run for the PR that introduces it
+  # (GitHub only discovers workflow_dispatch from the default branch).
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
     inputs:
       user:
@@ -37,10 +46,11 @@ on:
 
 env:
   GIT_TERMINAL_PROMPT: "0"
-  ROOTFS_USER: ${{ inputs.user }}
-  ROOTFS_PASSWORD: ${{ inputs.password }}
-  EXTRA_PACKAGES: ${{ inputs.extra_packages }}
-  ROOT_UUID: ${{ inputs.root_uuid }}
+  # inputs.* is empty on pull_request runs; fall back to defaults
+  ROOTFS_USER: ${{ inputs.user || 'test' }}
+  ROOTFS_PASSWORD: ${{ inputs.password || 'test' }}
+  EXTRA_PACKAGES: ${{ inputs.extra_packages || 'openssh,busybox-extras,postmarketos-mkinitfs-hook-debug-shell' }}
+  ROOT_UUID: ${{ inputs.root_uuid || '3725f30e-2934-4a82-a4c2-f32211aeee4c' }}
 
 jobs:
   build-rootfs:
