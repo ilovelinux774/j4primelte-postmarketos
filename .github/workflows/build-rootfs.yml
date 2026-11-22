@@ -1,0 +1,310 @@
+# Builds the Samsung Galaxy J4+ (j4primelte) postmarketOS rootfs with
+# pmbootstrap on GitHub Actions.
+#
+# The flashable artifact is a FLAT ext4 image (no partition table). It is meant
+# to be flashed next to a separately built boot image (e.g. the medusa64 boot
+# image whose kernel is aarch64 Linux 3.18.120 and whose embedded initramfs is
+# a postmarketOS initramfs). The boot image cmdline must carry
+#   pmos_root_uuid=<UUID shown in the workflow summary / uuid.txt artifact>
+# otherwise the initramfs cannot find the root filesystem.
+#
+# The kernel that installs into the rootfs is Alpine's binary `linux-lts`
+# package. It is NOT meant to be flashed or booted from; it only satisfies
+# mkinitfs so the image builds deterministically. Boot happens through the
+# separately provided boot image.
+
+name: Build j4primelte rootfs (pmbootstrap)
+
+concurrency:
+  group: build-rootfs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+on:
+  # pull_request lets the workflow run for the PR that introduces it
+  # (GitHub only discovers workflow_dispatch from the default branch).
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      user:
+        description: 'Username for the rootfs login (UID 10000)'
+        required: true
+        default: 'test'
+      password:
+        description: 'Test password for the user (plain text, test only!)'
+        required: true
+        default: 'test'
+      extra_packages:
+        description: 'Extra packages to install into the rootfs (comma separated)'
+        required: true
+        default: 'openssh,busybox-extras,postmarketos-mkinitfs-hook-debug-shell'
+      root_uuid:
+        description: 'ext4 UUID for the rootfs image (set to 86e7262b-b628-4b89-8a6e-e96ef9b1aab6 only if your boot image still carries that cmdline value)'
+        required: true
+        default: '3725f30e-2934-4a82-a4c2-f32211aeee4c'
+
+env:
+  GIT_TERMINAL_PROMPT: "0"
+  # inputs.* is empty on pull_request runs; fall back to defaults
+  ROOTFS_USER: ${{ inputs.user || 'test' }}
+  ROOTFS_PASSWORD: ${{ inputs.password || 'test' }}
+  EXTRA_PACKAGES: ${{ inputs.extra_packages || 'openssh,busybox-extras,postmarketos-mkinitfs-hook-debug-shell' }}
+  ROOT_UUID: ${{ inputs.root_uuid || '3725f30e-2934-4a82-a4c2-f32211aeee4c' }}
+
+jobs:
+  build-rootfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache || true
+          sudo apt-get purge -y '^mono-*' '^llvm-*' '^php*' '^mysql-*' '^postgresql-*' \
+            'google-chrome-*' 'microsoft-edge-*' firefox 'powershell' || true
+          sudo apt-get autoremove -y || true
+          sudo apt-get clean
+          df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl file git gnupg make xz-utils \
+            python3 python3-pip qemu-user-static binfmt-support \
+            sudo util-linux e2fsprogs tar gzip rsync \
+            android-sdk-libsparse-utils || true
+          # libsparse is optional (--no-sparse is used). Make sure the
+          # mandatory set is installed even if it is unavailable.
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl file git gnupg make xz-utils \
+            python3 python3-pip qemu-user-static binfmt-support \
+            sudo util-linux e2fsprogs tar gzip rsync
+          df -h
+
+      - name: Clone pmbootstrap
+        run: |
+          git clone --depth=1 https://gitlab.postmarketos.org/postmarketOS/pmbootstrap.git ~/pmbootstrap
+          python3 ~/pmbootstrap/pmbootstrap.py --version
+
+      - name: Initialize pmbootstrap
+        run: |
+          yes "" | python3 ~/pmbootstrap/pmbootstrap.py init 2>&1 || true
+          python3 ~/pmbootstrap/pmbootstrap.py config device samsung-j4primelte
+          python3 ~/pmbootstrap/pmbootstrap.py config extra_packages "$EXTRA_PACKAGES"
+          python3 ~/pmbootstrap/pmbootstrap.py config service_manager openrc
+          python3 ~/pmbootstrap/pmbootstrap.py config ui console
+          python3 ~/pmbootstrap/pmbootstrap.py config user "$ROOTFS_USER"
+          python3 ~/pmbootstrap/pmbootstrap.py config hostname j4primelte
+          python3 ~/pmbootstrap/pmbootstrap.py config timezone UTC
+          python3 ~/pmbootstrap/pmbootstrap.py config locale C.UTF-8
+          python3 ~/pmbootstrap/pmbootstrap.py config aports
+
+      - name: Overlay the j4primelte device and firmware packages
+        run: |
+          set -euo pipefail
+          PMAPORTS="$(python3 ~/pmbootstrap/pmbootstrap.py config aports)"
+          test -d "$PMAPORTS" || { echo "ERROR: aports dir not found: $PMAPORTS"; exit 1; }
+
+          mkdir -p "$PMAPORTS/device/downstream" "$PMAPORTS/firmware"
+          cp -a overlay/device/downstream/device-samsung-j4primelte \
+            "$PMAPORTS/device/downstream/device-samsung-j4primelte"
+          cp -a overlay/firmware/firmware-samsung-j4primelte \
+            "$PMAPORTS/firmware/firmware-samsung-j4primelte"
+          find "$PMAPORTS/device/downstream/device-samsung-j4primelte" \
+               "$PMAPORTS/firmware/firmware-samsung-j4primelte" -type f | sort
+
+          # Recompute checksums in case of copy/edit drift
+          python3 ~/pmbootstrap/pmbootstrap.py checksum firmware-samsung-j4primelte
+          python3 ~/pmbootstrap/pmbootstrap.py checksum device-samsung-j4primelte
+
+      - name: Build the rootfs image (single partition, raw ext4)
+        run: |
+          set -o pipefail
+          mkdir -p build-artifacts
+          if ! python3 ~/pmbootstrap/pmbootstrap.py install \
+               --single-partition --no-sparse \
+               --password "$ROOTFS_PASSWORD" 2>&1 | tee build.log; then
+            echo "=== BUILD FAILED ==="
+            LOGFILE="$HOME/.local/var/pmbootstrap/log.txt"
+            if [ -f "$LOGFILE" ]; then
+              echo "=== raw pmbootstrap log file (last 300 lines) ==="
+              tail -300 "$LOGFILE"
+            fi
+            cp build.log build-artifacts/ 2>/dev/null || true
+            cp "$LOGFILE" build-artifacts/pmbootstrap-log.txt 2>/dev/null || true
+            python3 ~/pmbootstrap/pmbootstrap.py zap 2>&1 | tail -5 || true
+            exit 1
+          fi
+          df -h
+
+      - name: Upload pmbootstrap logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-build-logs-${{ github.run_number }}
+          path: |
+            build-artifacts/
+            build.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Log tail as annotations (on failure)
+        if: failure()
+        run: |
+          LOGFILE="$HOME/.local/var/pmbootstrap/log.txt"
+          SRC="build.log"
+          [ -f "$SRC" ] || SRC="$LOGFILE"
+          echo "::warning::===== tail of $SRC ====="
+          tail -c 60000 "$SRC" | tail -110 | sed -e 's/%/%25/g' -e 's/\r/%0D/g' \
+            | while IFS= read -r line; do
+                line="$(printf '%.1800s' "$line")"
+                echo "::error::${line}"
+              done
+
+      - name: Mirror reachability preflight (always, as annotations)
+        if: always()
+        run: |
+          for url in \
+            https://gitlab.postmarketos.org/ \
+            https://mirror.postmarketos.org/ \
+            https://dl-cdn.alpinelinux.org/alpine/ \
+            https://github.com/ \
+          ; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 8 --max-time 20 "$url" || echo curl-failed)"
+            echo "::warning::reachability $url -> $code"
+          done
+
+      - name: Export and stamp the rootfs image
+        run: |
+          set -euo pipefail
+          mkdir -p pmos-export
+          python3 ~/pmbootstrap/pmbootstrap.py export --no-install pmos-export
+
+          cd pmos-export
+          # Replace any symlinks with the real files
+          for l in *; do
+            if [ -L "$l" ]; then
+              target="$(readlink -f "$l")"
+              rm "$l"
+              [ -f "$target" ] && cp "$target" "$l" || true
+            fi
+          done
+          ls -la
+
+          test -f samsung-j4primelte.img || { echo "ERROR: samsung-j4primelte.img not exported"; exit 1; }
+          mv samsung-j4primelte.img ../rootfs.img
+          cd ..
+          ls -la rootfs.img
+
+          # Pin the ext4 UUID so the boot image cmdline can be aligned exactly
+          if [ -n "$ROOT_UUID" ]; then
+            tune2fs -U "$ROOT_UUID" rootfs.img
+          fi
+          ACTUAL_UUID="$(tune2fs -l rootfs.img | awk -F': ' '/^Filesystem UUID/ {print $2}')"
+          echo "Rootfs ext4 UUID: $ACTUAL_UUID"
+          echo "$ACTUAL_UUID" > uuid.txt
+
+          echo "=== rootfs image sanity checks ==="
+          file -b rootfs.img
+          # No GPT/protective MBR: this is a bare flat ext4 filesystem
+          if od -An -tx1 -j 512 -N 8 rootfs.img | grep -qi '45 46 49 20'; then
+            echo "ERROR: GPT signature present - image has a partition table!"
+            exit 1
+          fi
+          od -An -tx1 -j 1080 -N 2 rootfs.img | grep -qi '53 ef' \
+            || { echo "ERROR: ext4 magic not found at 0x438"; exit 1; }
+          tune2fs -l rootfs.img | grep -E 'Filesystem (magic|features|UUID)|Inode size' || true
+          for bad in metadata_csum metadata_csum_seed meta_bg; do
+            if tune2fs -l rootfs.img | grep "Filesystem features" | grep -qw "$bad"; then
+              echo "ERROR: feature '$bad' is set - downstream 3.18 kernels may panic"
+              exit 1
+            fi
+          done
+          echo "OK: bare ext4 rootfs, downstream-kernel safe features"
+
+      - name: Write FLASHING.txt
+        run: |
+          python3 - <<'PYEOF'
+          import os, textwrap
+          uuid = open("uuid.txt").read().strip()
+          user = os.environ["ROOTFS_USER"]
+          text = f"""\
+          postmarketOS rootfs for Samsung Galaxy J4+ (j4primelte)
+          =========================================================
+
+          Files in this artifact:
+            rootfs-j4primelte.img.xz   Root filesystem (flat ext4, NO partition table)
+            rootfs-j4primelte.img.xz.sha256
+            uuid.txt                   ext4 UUID baked into the rootfs: {uuid}
+            FLASHING.txt               This file
+
+          The kernel/boot image is NOT built here and NOT included. Flash your own
+          boot image (e.g. the medusa64 boot image) separately.
+
+          *** IMPORTANT - boot image cmdline ***
+          The initramfs in the boot image locates the root filesystem by
+          pmos_root_uuid. The boot image cmdline must therefore carry:
+              pmos_root_uuid={uuid}
+          If your current boot image still has
+              pmos_root_uuid=86e7262b-b628-4b89-8a6e-e96ef9b1aab6
+          either repack it with the value above, or rebuild this workflow
+          with the root_uuid input set to that old value.
+
+          Flashing (image is a bare ext4 filesystem, not sparse, no GPT):
+            1. Heimdall:  unxz rootfs-j4primelte.img.xz && \\
+               heimdall flash --SYSTEM rootfs-j4primelte.img
+            2. Or in TWRP: Install Image -> select rootfs-j4primelte.img
+               -> flash to the "System"/rootfs partition.
+            3. Flash your boot image to BOOT separately.
+            4. Reboot. The postmarketOS debug shell (if your cmdline has
+               pmos.debug-shell) or the console login greets you.
+
+          Default login: user "{user}" with the password you set when
+          dispatching this workflow (default "test" / "test").
+          sshd is installed; the usb-network gadget address used by the
+          postmarketOS initramfs is 172.16.42.1/24.
+          """
+          text = textwrap.dedent(text)
+          open("FLASHING.txt", "w").write(text)
+          print(text)
+          PYEOF
+
+      - name: Compress the rootfs image
+        run: |
+          mv rootfs.img rootfs-j4primelte.img
+          xz -T0 -9 rootfs-j4primelte.img
+          sha256sum rootfs-j4primelte.img.xz > rootfs-j4primelte.img.xz.sha256
+          ls -la rootfs-j4primelte.img.xz*
+
+      - name: Write workflow summary
+        run: |
+          UUID="$(cat uuid.txt)"
+          {
+            echo "## j4primelte postmarketOS rootfs"
+            echo ""
+            echo "- ext4 UUID: \`${UUID}\`"
+            echo "- Boot image cmdline must contain: \`pmos_root_uuid=${UUID}\`"
+            echo "- Flash: unxz \`rootfs-j4primelte.img.xz\`, write it to the rootfs/System partition (flat ext4, no partition table)"
+            echo "- Login: user \`${ROOTFS_USER}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: j4primelte-rootfs-${{ github.run_number }}
+          path: |
+            rootfs-j4primelte.img.xz
+            rootfs-j4primelte.img.xz.sha256
+            uuid.txt
+            FLASHING.txt
+          if-no-files-found: error
+          retention-days: 14
